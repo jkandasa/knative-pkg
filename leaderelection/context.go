@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 
+	"go.uber.org/zap"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
@@ -128,6 +130,33 @@ func (b *standardBuilder) buildElector(ctx context.Context, la reconciler.Leader
 			return nil, err
 		}
 		id = uid
+	}
+
+	// removes absolute leases
+	leases, err := b.kc.CoordinationV1().Leases(system.Namespace()).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		logger.Error("error on listing leases", zap.Error(err))
+		return nil, err
+	}
+	firstLeaseName := standardBucketName(0, queueName, b.lec)
+	// sample name: tekton-pipelines-controller.github.com.tektoncd.pipeline.pkg.reconciler.taskrun.reconciler.00-of-04
+	// remove last 9 chars, that is the dynamic part
+	leaseNamePrefix := firstLeaseName[:len(firstLeaseName)-9]
+	for _, lease := range leases.Items {
+		leaseName := lease.GetName()
+		leaseSuffix := fmt.Sprintf("-of-%02d", b.lec.Buckets)
+		if strings.HasPrefix(leaseName, leaseNamePrefix) {
+			// if the lease name does not contain the suffix, it is old lease
+			// removes the absolute lease
+			if !strings.HasSuffix(leaseName, leaseSuffix) {
+				err = b.kc.CoordinationV1().Leases(system.Namespace()).Delete(ctx, leaseName, metav1.DeleteOptions{})
+				if err != nil {
+					logger.Error("error on removing a lease", zap.String("leaseName", leaseName), zap.Error(err))
+				} else {
+					logger.Info("absolute lease removed", zap.String("leaseName", leaseName))
+				}
+			}
+		}
 	}
 
 	bkts := newStandardBuckets(queueName, b.lec)
